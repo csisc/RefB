@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wikidata PubMed referencer</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=Source+Serif+4:wght@400;600&display=swap">
+<style>
+:root{--bg:#f3f6f4;--ink:#17262b;--mut:#5b6b70;--line:#cfdad6;--card:#fff;--acc:#0b6e72;--mk:#ffe58a;--ok:#e3f3e8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px 80px}
+h1{font:600 26px "Source Serif 4",Georgia,serif;margin:0 0 4px}
+p.sub{margin:0 0 20px;color:var(--mut);max-width:70ch}
+fieldset{border:1px solid var(--line);border-radius:6px;background:var(--card);padding:14px;margin:0 0 16px}
+legend{font-weight:600;padding:0 6px}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+textarea,input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:4px;font:inherit;background:#fff;color:var(--ink)}
+textarea{min-height:64px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}.row>div{flex:1;min-width:160px}
+button{font:inherit;padding:7px 14px;border:1px solid var(--acc);background:var(--acc);color:#fff;border-radius:4px;cursor:pointer}
+button.alt{background:#fff;color:var(--acc)}button:disabled{opacity:.5;cursor:default}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #7cc4c7;outline-offset:1px}
+#status{color:var(--mut);margin:8px 0;min-height:22px}
+.st{background:var(--card);border:1px solid var(--line);border-radius:6px;margin:0 0 12px}
+.st.done{border-color:#7fbf92}
+.sh{display:flex;gap:10px;justify-content:space-between;align-items:center;padding:10px 14px;flex-wrap:wrap}
+.sh b{font-weight:600}.sh a{color:var(--acc)}.pid{color:var(--mut);font-size:13px}
+.cands{border-top:1px solid var(--line)}
+.c{padding:10px 14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:22px 1fr;gap:6px}
+.c:last-child{border-bottom:0}.c.sel{background:var(--ok)}
+.c h4{margin:0;font-size:14px;font-weight:600}.meta{font-size:12px;color:var(--mut)}
+.ev{font:15px/1.55 "Source Serif 4",Georgia,serif;margin:6px 0 0;max-width:75ch}
+mark.s{background:var(--mk)}mark.o{background:#bfe3e5}
+.tag{font-size:12px;padding:1px 6px;border-radius:3px;background:#e8efec;margin-left:6px}.tag.g{background:#cdeed7}
+code{font-size:12px}#out{min-height:140px}
+</style></head><body><main>
+<noscript>This site needs JavaScript to query Wikidata and PubMed.</noscript>
+<h1>Wikidata PubMed referencer</h1>
+<p class="sub">Finds Wikidata statements between two items that have no reference, searches PubMed for papers mentioning both items, and shows the sentences that support the claim. Pick a paper, then export a QuickStatements batch.</p>
+
+<fieldset><legend>1. Choose items</legend>
+<label for="qids">Wikidata item IDs (one per line or separated by spaces)</label>
+<textarea id="qids" placeholder="Q12174&#10;Q35869"></textarea>
+<label for="file">Or load a text/CSV file containing item IDs</label><input type="file" id="file" accept=".txt,.csv,.tsv">
+<div class="row">
+ <div><label for="prop">Only this property (optional, e.g. P2175)</label><input type="text" id="prop"></div>
+ <div><label for="extra">Extra PubMed terms (optional)</label><input type="text" id="extra" placeholder="treatment OR therapy"></div>
+ <div><label for="key">NCBI API key (optional, faster)</label><input type="text" id="key"></div>
+</div>
+<div class="row" style="margin-top:12px">
+ <button id="load">Load unreferenced statements</button>
+ <button id="disc" class="alt">Suggest MeSH-linked items for the property</button>
+ <button id="ex" class="alt">Example</button>
+</div></fieldset>
+
+<div id="status" role="status"></div>
+<div class="row" id="bar" hidden style="margin-bottom:12px">
+ <button id="all">Search PubMed for all</button>
+ <label style="margin:0"><input type="checkbox" id="skip" checked> Skip instance of / subclass of</label>
+</div>
+<div id="list"></div>
+
+<fieldset id="exp" hidden><legend>2. QuickStatements batch</legend>
+<textarea id="out" readonly></textarea>
+<div class="row" style="margin-top:10px"><button id="copy">Copy batch</button><button id="dl" class="alt">Download .txt</button>
+<a href="https://quickstatements.toolforge.org/#/batch" target="_blank" rel="noopener" style="align-self:center;color:var(--acc)">Open QuickStatements</a></div>
+<p class="meta">Each line adds a reference to the existing statement: PubMed ID (S698) and retrieval date (S813). Review every paper before running the batch.</p>
+</fieldset>
+
+<script>
+const $=s=>document.querySelector(s),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const WD='https://www.wikidata.org/w/api.php',EU='https://eutils.ncbi.nlm.nih.gov/entrez/eutils/';
+const HINT={P2175:'treatment OR therapy OR treated',P780:'symptom OR sign OR manifestation',P828:'cause OR etiology',P1060:'pathogenesis OR mechanism',P2176:'treatment OR therapy OR drug',P769:'interaction',P2293:'gene OR association'};
+let rows=[],sel={},labs={};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const status=t=>$('#status').textContent=t;
+
+async function wd(p){const u=new URL(WD);for(const[k,v]of Object.entries({format:'json',origin:'*',...p}))u.searchParams.set(k,v);const r=await fetch(u);if(!r.ok)throw Error('Wikidata '+r.status);return r.json()}
+async function getLabels(ids){
+ ids=[...new Set(ids)].filter(i=>!labs[i]);
+ for(let i=0;i<ids.length;i+=50){
+  const r=await wd({action:'wbgetentities',ids:ids.slice(i,i+50).join('|'),props:'labels|aliases',languages:'en'});
+  for(const[id,e]of Object.entries(r.entities||{}))labs[id]={l:e.labels?.en?.value||id,a:(e.aliases?.en||[]).map(a=>a.value)};
+ }}
+const unref=c=>!(c.references||[]).some(r=>Object.keys(r.snaks).some(p=>p!=='P143'&&p!=='P4656'));
+
+async function load(){
+ const ids=($('#qids').value.match(/Q\d+/gi)||[]).map(s=>s.toUpperCase());
+ if(!ids.length)return status('Enter at least one item ID, for example Q12174.');
+ const only=($('#prop').value.match(/P\d+/i)||[''])[0].toUpperCase();
+ rows=[];sel={};$('#list').innerHTML='';$('#exp').hidden=true;
+ try{
+  for(let i=0;i<ids.length;i+=5){
+   status(`Loading items ${i+1}–${Math.min(i+5,ids.length)} of ${ids.length}…`);
+   const r=await wd({action:'wbgetentities',ids:ids.slice(i,i+5).join('|'),props:'claims'});
+   for(const[q,e]of Object.entries(r.entities||{}))for(const[p,cl]of Object.entries(e.claims||{})){
+    if(only&&p!==only)continue;
+    for(const c of cl){const m=c.mainsnak;
+     if(m.snaktype!=='value'||m.datatype!=='wikibase-item'||!unref(c))continue;
+     rows.push({id:c.id,s:q,p,o:m.datavalue.value.id,cands:null});}
+   }}
+  await getLabels(rows.flatMap(r=>[r.s,r.p,r.o]));
+  render();
+  status(rows.length?`${rows.length} statements without a reference.`:'No unreferenced item-to-item statements found for these items.');
+  $('#bar').hidden=!rows.length;
+ }catch(e){status('Error: '+e.message)}
+}
+function visible(){return rows.filter(r=>!($('#skip').checked&&(r.p==='P31'||r.p==='P279')))}
+function render(){
+ $('#list').innerHTML=visible().map(r=>{const i=rows.indexOf(r);return `<div class="st${sel[r.id]?' done':''}" id="r${i}">
+ <div class="sh"><div><a target="_blank" rel="noopener" href="https://www.wikidata.org/wiki/${r.s}"><b>${esc(labs[r.s].l)}</b></a>
+ <span class="pid">${esc(labs[r.p].l)} (${r.p})</span>
+ <a target="_blank" rel="noopener" href="https://www.wikidata.org/wiki/${r.o}"><b>${esc(labs[r.o].l)}</b></a></div>
+ <button class="alt" data-i="${i}">Search PubMed</button></div>
+ <div class="cands" id="c${i}" hidden></div></div>`}).join('');
+ $('#list').querySelectorAll('button[data-i]').forEach(b=>b.onclick=()=>search(+b.dataset.i));
+ exportQS();
+}
+const terms=id=>[labs[id].l,...labs[id].a.slice(0,3)];
+const tq=id=>'('+terms(id).map(t=>`"${t.replace(/"/g,'')}"[tiab]`).join(' OR ')+')';
+async function eu(path,params){
+ const u=new URL(EU+path);for(const[k,v]of Object.entries({tool:'wd-pubmed-referencer',...params}))u.searchParams.set(k,v);
+ const k=$('#key').value.trim();if(k)u.searchParams.set('api_key',k);
+ await sleep(k?120:360);const r=await fetch(u);if(!r.ok)throw Error('PubMed '+r.status);return r;}
+function sentences(t){return t.split(/(?<=[.!?])\s+(?=[A-Z0-9(])/)}
+function hit(t,ts){const l=t.toLowerCase();return ts.some(x=>l.includes(x.toLowerCase()))}
+function mark(t,ts,cls){for(const x of ts.sort((a,b)=>b.length-a.length)){t=t.replace(new RegExp(x.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi'),m=>`\u0001${cls}${m}\u0002`)}return t}
+function fmt(t,st,ot){let h=esc(t);
+ for(const[ts,c]of[[st,'s'],[ot,'o']])for(const x of [...ts].sort((a,b)=>b.length-a.length)){
+  h=h.replace(new RegExp(esc(x).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?![^<]*>)','gi'),m=>`<mark class="${c}">${m}</mark>`)}
+ return h}
+async function search(i){
+ const r=rows[i],box=$('#c'+i);box.hidden=false;box.innerHTML='<div class="c"><span></span><span class="meta">Searching PubMed…</span></div>';
+ const extra=$('#extra').value.trim()||HINT[r.p]||'';
+ const term=`${tq(r.s)} AND ${tq(r.o)}`+(extra?` AND (${extra})`:'')+' AND hasabstract';
+ try{
+  let js=await(await eu('esearch.fcgi',{db:'pubmed',retmode:'json',retmax:6,sort:'relevance',term})).json();
+  let ids=js.esearchresult.idlist,relaxed=false;
+  if(!ids.length&&extra){js=await(await eu('esearch.fcgi',{db:'pubmed',retmode:'json',retmax:6,sort:'relevance',term:`${tq(r.s)} AND ${tq(r.o)} AND hasabstract`})).json();ids=js.esearchresult.idlist;relaxed=true}
+  if(!ids.length){box.innerHTML='<div class="c"><span></span><span class="meta">No PubMed paper mentions both items in its title or abstract.</span></div>';return}
+  const x=new DOMParser().parseFromString(await(await eu('efetch.fcgi',{db:'pubmed',retmode:'xml',id:ids.join(',')})).text(),'text/xml');
+  const st=terms(r.s),ot=terms(r.o);
+  r.cands=[...x.querySelectorAll('PubmedArticle')].map(a=>{
+   const g=q=>a.querySelector(q)?.textContent||'';
+   const abs=[...a.querySelectorAll('AbstractText')].map(n=>n.textContent).join(' ');
+   const ss=sentences(abs),both=ss.filter(s=>hit(s,st)&&hit(s,ot));
+   return{pmid:g('MedlineCitation>PMID'),title:g('ArticleTitle'),j:g('Journal>Title'),y:g('JournalIssue Year')||g('PubDate Year')||(g('MedlineDate').slice(0,4)),
+    types:[...a.querySelectorAll('PublicationType')].map(n=>n.textContent),ev:both.length?both.slice(0,2):ss.filter(s=>hit(s,st)||hit(s,ot)).slice(0,2),both:both.length>0,st,ot}
+  }).sort((a,b)=>b.both-a.both);
+  box.innerHTML=(relaxed?'<div class="c"><span></span><span class="meta">No match with the extra terms; showing papers that mention both items.</span></div>':'')+
+  r.cands.map((c,k)=>`<label class="c${sel[r.id]===c.pmid?' sel':''}" style="margin:0;color:inherit;font-size:inherit"><input type="radio" name="p${i}" ${sel[r.id]===c.pmid?'checked':''} data-i="${i}" data-p="${c.pmid}">
+   <div><h4>${esc(c.title)}${c.both?'<span class="tag g">both in one sentence</span>':'<span class="tag">separate sentences</span>'}</h4>
+   <div class="meta">${esc(c.j)} ${esc(c.y)} · PMID <a target="_blank" rel="noopener" href="https://pubmed.ncbi.nlm.nih.gov/${c.pmid}/">${c.pmid}</a>${c.types.length?' · '+esc(c.types.slice(0,2).join(', ')):''}</div>
+   ${c.ev.map(e=>`<p class="ev">${fmt(e,c.st,c.ot)}</p>`).join('')}</div></label>`).join('')+
+  `<div class="c"><span></span><button class="alt" data-clear="${i}">No suitable paper</button></div>`;
+  box.querySelectorAll('input[type=radio]').forEach(b=>b.onchange=()=>{sel[r.id]=b.dataset.p;mark2(i)});
+  box.querySelector('[data-clear]').onclick=()=>{delete sel[r.id];box.querySelectorAll('input').forEach(b=>b.checked=false);mark2(i)};
+ }catch(e){box.innerHTML=`<div class="c"><span></span><span class="meta">Error: ${esc(e.message)}</span></div>`}
+}
+function mark2(i){const r=rows[i];$('#r'+i).classList.toggle('done',!!sel[r.id]);
+ $('#c'+i).querySelectorAll('label.c').forEach(l=>l.classList.toggle('sel',l.querySelector('input').dataset.p===sel[r.id]));exportQS()}
+function exportQS(){
+ const d='+'+new Date().toISOString().slice(0,10)+'T00:00:00Z/11';
+ const L=rows.filter(r=>sel[r.id]).map(r=>`${r.s}|${r.p}|${r.o}|S698|"${sel[r.id]}"|S813|${d}`);
+ $('#exp').hidden=!L.length;$('#out').value=L.join('\n');}
+$('#load').onclick=load;
+$('#skip').onchange=render;
+$('#all').onclick=async()=>{const b=$('#all');b.disabled=true;const v=visible();
+ for(let n=0;n<v.length;n++){status(`Searching PubMed ${n+1} of ${v.length}…`);if(!v[n].cands)await search(rows.indexOf(v[n]))}
+ status('PubMed search finished. Choose a paper for each statement you want to reference.');b.disabled=false};
+$('#copy').onclick=async()=>{await navigator.clipboard.writeText($('#out').value);status('Batch copied.')};
+$('#ex').onclick=()=>{$('#qids').value='Q12174\nQ35869\nQ11081';$('#prop').value='';status('Example items loaded. Select Load unreferenced statements.')};
+$('#disc').onclick=async()=>{
+ const p=($('#prop').value.match(/P\d+/i)||['P2175'])[0].toUpperCase();$('#prop').value=p;
+ status('Asking Wikidata Query Service…');
+ const q=`SELECT DISTINCT ?s WHERE{?s wdt:P486 [];p:${p} ?st.FILTER NOT EXISTS{?st prov:wasDerivedFrom []}}LIMIT 15`;
+ try{const r=await fetch('https://query.wikidata.org/sparql?format=json&query='+encodeURIComponent(q));
+  const j=await r.json();$('#qids').value=j.results.bindings.map(b=>b.s.value.split('/').pop()).join('\n');
+  status(`${j.results.bindings.length} items with a MeSH descriptor ID and an unreferenced ${p} statement.`)}
+ catch(e){status('Query failed: '+e.message)}};
+
+$('#file').onchange=async e=>{const f=e.target.files[0];if(!f)return;const t=await f.text();
+ const q=[...new Set(t.match(/Q\d+/gi)||[])].map(x=>x.toUpperCase());
+ $('#qids').value=q.join('\n');status(`${q.length} item IDs read from ${f.name}.`)};
+$('#dl').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([$('#out').value],{type:'text/plain'}));a.download='quickstatements-batch.txt';a.click()};
+['key','extra','prop'].forEach(k=>{try{$('#'+k).value=localStorage.getItem('wpr_'+k)||'';$('#'+k).addEventListener('change',()=>localStorage.setItem('wpr_'+k,$('#'+k).value))}catch(e){}});
+</script>
+<footer class="meta" style="margin-top:32px">Data from <a href="https://www.wikidata.org" target="_blank" rel="noopener">Wikidata</a> (CC0) and <a href="https://pubmed.ncbi.nlm.nih.gov" target="_blank" rel="noopener">PubMed</a> via NCBI E-utilities. Runs entirely in your browser; nothing is sent to any server of ours.</footer></main></body></html>
